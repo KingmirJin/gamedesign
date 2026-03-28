@@ -50,7 +50,15 @@ local ship = {
     trail = {},        -- { {x,y}, ... }
     alive = true,
     toggleFlash = 0,   -- 切换闪光计时
+    -- 电磁感应
+    induction = 0,     -- 瞬时感应值 0~1
+    energy = 0,        -- 累积能量 0~100
+    boostFlash = 0,    -- 冲刺闪光计时
 }
+local ENERGY_MAX = 100
+local ENERGY_CHARGE_RATE = 35   -- 每秒满感应下充能速率
+local BOOST_STRENGTH = 400     -- 冲刺速度增量
+local lastClickTime = 0        -- 双击检测
 
 -- 粒子系统 (磁力线可视化)
 local particles = {}   -- { {x,y,vx,vy,life,maxLife}, ... }
@@ -121,21 +129,41 @@ local function InitLevels()
         {
             name = "磁力弹弓",
             subtitle = "高阶：双极变轨",
-            desc = "利用上方N极弹射，在中途切换磁极借S极转弯到达目标！",
+            desc = "被左侧N极弹射向右，中途切换磁极借S极引力转弯！",
             tutorial = {
-                "先保持红色(N)被上方N极推开",
-                "飞到中间时切换为蓝色(S)",
-                "S极会吸引你转弯向下",
-                "瞄准目标，适时再切换微调！",
+                "保持红色(N)，左边N极会把你推向右边",
+                "飞到中间偏右时切换为蓝色(S)",
+                "右下方S极会吸引你转弯向下",
+                "靠近目标时再切换微调方向！",
             },
             stars = {
-                { x = W * 0.30, y = H * 0.20, pol = "N", str = FIELD_STRENGTH * 0.5, r = 40 },
-                { x = W * 0.70, y = H * 0.80, pol = "S", str = FIELD_STRENGTH * 0.4, r = 35 },
+                { x = W * 0.10, y = H * 0.40, pol = "N", str = FIELD_STRENGTH * 0.8, r = 40 },
+                { x = W * 0.75, y = H * 0.75, pol = "S", str = FIELD_STRENGTH * 0.65, r = 35 },
             },
-            shipStart = { x = W * 0.15, y = H * 0.35 },
+            shipStart = { x = W * 0.22, y = H * 0.38 },
             shipPol = "N",
-            goal = { x = W * 0.88, y = H * 0.65 },
-            goalR = GOAL_RADIUS * 1.2,
+            goal = { x = W * 0.85, y = H * 0.55 },
+            goalR = GOAL_RADIUS * 1.3,
+        },
+        -- 关卡4：法拉第挑战 - 电磁感应
+        {
+            name = "法拉第挑战",
+            subtitle = "终极：电磁感应冲刺",
+            desc = "在磁极间来回穿梭积累能量，冲刺飞向远方目标！",
+            tutorial = {
+                "在N极和S极之间穿梭，切割磁力线",
+                "飞船周围出现电弧=正在感应充能",
+                "底部能量条满后，按E键或双击冲刺！",
+                "只有冲刺才能到达远处的目标点！",
+            },
+            stars = {
+                { x = W * 0.25, y = H * 0.35, pol = "N", str = FIELD_STRENGTH * 0.55, r = 42 },
+                { x = W * 0.25, y = H * 0.70, pol = "S", str = FIELD_STRENGTH * 0.50, r = 38 },
+            },
+            shipStart = { x = W * 0.38, y = H * 0.52 },
+            shipPol = "N",
+            goal = { x = W * 0.88, y = H * 0.50 },
+            goalR = GOAL_RADIUS * 1.4,
         },
     }
 end
@@ -434,6 +462,9 @@ local function StartLevel(idx)
     ship.trail = {}
     ship.alive = true
     ship.toggleFlash = 0
+    ship.induction = 0
+    ship.energy = 0
+    ship.boostFlash = 0
 
     -- 清空粒子
     particles = {}
@@ -484,6 +515,47 @@ local function UpdateShip(dt)
         ship.toggleFlash = ship.toggleFlash - dt * 3.0
         if ship.toggleFlash < 0 then ship.toggleFlash = 0 end
     end
+
+    -- 冲刺闪光衰减
+    if ship.boostFlash > 0 then
+        ship.boostFlash = ship.boostFlash - dt * 2.5
+        if ship.boostFlash < 0 then ship.boostFlash = 0 end
+    end
+
+    -- 电磁感应：速度与磁场的叉积 = 切割磁力线的分量
+    local bx, by = FieldAt(ship.x, ship.y, false)
+    local bMag = math.sqrt(bx * bx + by * by)
+    if bMag > 0.01 and speed > 10 then
+        local cross = math.abs(ship.vx * by - ship.vy * bx)
+        -- 归一化到 0~1
+        ship.induction = math.min(1.0, cross / (MAX_SPEED * bMag * 0.5))
+    else
+        ship.induction = ship.induction * 0.9  -- 平滑衰减
+    end
+
+    -- 能量累积
+    ship.energy = math.min(ENERGY_MAX, ship.energy + ship.induction * ENERGY_CHARGE_RATE * dt)
+end
+
+--- 飞船冲刺（消耗能量）
+local function BoostShip()
+    if not ship.alive or ship.energy < 20 then return end
+    if gameState ~= "playing" then return end
+
+    local speed = math.sqrt(ship.vx * ship.vx + ship.vy * ship.vy)
+    if speed > 5 then
+        -- 沿当前速度方向冲刺
+        local ratio = BOOST_STRENGTH * (ship.energy / ENERGY_MAX) / speed
+        ship.vx = ship.vx + ship.vx * ratio
+        ship.vy = ship.vy + ship.vy * ratio
+    else
+        -- 无速度时向右冲
+        ship.vx = ship.vx + BOOST_STRENGTH
+    end
+
+    ship.boostFlash = 1.0
+    ship.energy = 0
+    print("[GAME] Boost! Energy consumed.")
 end
 
 local function CheckCollisions()
@@ -836,6 +908,49 @@ local function DrawShip()
     nvgFillColor(vg, nvgRGBA(255, 255, 255, 200))
     nvgFill(vg)
 
+    -- 电磁感应电弧效果
+    if ship.induction > 0.08 then
+        local arcAlpha = ship.induction * 0.9
+        local arcCount = math.floor(ship.induction * 5) + 1
+        for a = 1, arcCount do
+            local seed = gameTime * 12.0 + a * 2.17
+            local startAngle = seed % (math.pi * 2)
+            local arcR = SHIP_RADIUS * (0.8 + ship.induction * 0.8)
+
+            nvgBeginPath(vg)
+            local px = math.cos(startAngle) * SHIP_RADIUS * 0.4
+            local py = math.sin(startAngle) * SHIP_RADIUS * 0.4
+            nvgMoveTo(vg, px, py)
+
+            -- 锯齿形闪电
+            local steps = 3 + math.floor(ship.induction * 3)
+            for s = 1, steps do
+                local t = s / steps
+                local baseX = math.cos(startAngle) * arcR * t
+                local baseY = math.sin(startAngle) * arcR * t
+                local jitter = (1 - t) * 5 * ship.induction
+                local jx = math.sin(seed * 7.3 + s * 3.1) * jitter
+                local jy = math.cos(seed * 5.7 + s * 2.3) * jitter
+                nvgLineTo(vg, baseX + jx, baseY + jy)
+            end
+
+            nvgStrokeColor(vg, nvgRGBAf(1.0, 0.95, 0.5, arcAlpha))
+            nvgStrokeWidth(vg, 1.0 + ship.induction * 1.5)
+            nvgStroke(vg)
+        end
+    end
+
+    -- 冲刺闪光
+    if ship.boostFlash > 0 then
+        nvgBeginPath(vg)
+        nvgCircle(vg, 0, 0, SHIP_RADIUS * (2.5 + (1.0 - ship.boostFlash) * 3.0))
+        local bfGrad = nvgRadialGradient(vg, 0, 0, 0, SHIP_RADIUS * 4,
+            nvgRGBAf(1, 1, 0.7, ship.boostFlash * 0.7),
+            nvgRGBAf(1, 0.9, 0.3, 0))
+        nvgFillPaint(vg, bfGrad)
+        nvgFill(vg)
+    end
+
     nvgRestore(vg)
 
     -- 极性标签 (在飞船旁边)
@@ -913,6 +1028,74 @@ local function DrawHUD()
     nvgTextAlign(vg, NVG_ALIGN_LEFT + NVG_ALIGN_MIDDLE)
     nvgFillColor(vg, nvgRGBA(255, 255, 255, 220))
     nvgText(vg, barX + 38, barY + barH / 2, polText, nil)
+
+    -- 能量条 (底部极性指示器左侧)
+    local energyBarW = 120
+    local energyBarH = 10
+    local energyBarX = barX - energyBarW - 16
+    local energyBarY = barY + (barH - energyBarH) / 2
+
+    -- 能量条背景
+    nvgBeginPath(vg)
+    nvgRoundedRect(vg, energyBarX - 2, energyBarY - 2, energyBarW + 4, energyBarH + 4, 7)
+    nvgFillColor(vg, nvgRGBA(0, 0, 0, 140))
+    nvgFill(vg)
+
+    -- 能量条边框
+    nvgBeginPath(vg)
+    nvgRoundedRect(vg, energyBarX, energyBarY, energyBarW, energyBarH, 5)
+    nvgStrokeColor(vg, nvgRGBA(200, 180, 60, 120))
+    nvgStrokeWidth(vg, 1)
+    nvgStroke(vg)
+
+    -- 能量条填充
+    local energyFrac = ship.energy / ENERGY_MAX
+    if energyFrac > 0.01 then
+        local fillW = energyBarW * energyFrac
+        nvgBeginPath(vg)
+        nvgRoundedRect(vg, energyBarX, energyBarY, fillW, energyBarH, 5)
+        -- 渐变：低能量黄色 → 高能量金色发亮
+        local energyGrad = nvgLinearGradient(vg, energyBarX, energyBarY, energyBarX + fillW, energyBarY,
+            nvgRGBA(200, 170, 40, 200),
+            nvgRGBA(255, 220, 60, 240))
+        nvgFillPaint(vg, energyGrad)
+        nvgFill(vg)
+    end
+
+    -- 能量达到可冲刺阈值时脉冲发光
+    if ship.energy >= 20 then
+        local pulse = 0.6 + 0.4 * math.sin(gameTime * 4.0)
+        nvgBeginPath(vg)
+        nvgRoundedRect(vg, energyBarX - 1, energyBarY - 1, energyBarW * energyFrac + 2, energyBarH + 2, 6)
+        nvgStrokeColor(vg, nvgRGBAf(1, 0.9, 0.4, pulse * 0.5))
+        nvgStrokeWidth(vg, 1.5)
+        nvgStroke(vg)
+    end
+
+    -- 能量标签
+    nvgFontSize(vg, 10)
+    nvgTextAlign(vg, NVG_ALIGN_CENTER + NVG_ALIGN_BOTTOM)
+    nvgFillColor(vg, nvgRGBA(200, 180, 60, 160))
+    nvgText(vg, energyBarX + energyBarW / 2, energyBarY - 4, "能量", nil)
+
+    -- 冲刺提示 (能量足够时)
+    if ship.energy >= 20 then
+        nvgFontSize(vg, 10)
+        nvgTextAlign(vg, NVG_ALIGN_CENTER + NVG_ALIGN_TOP)
+        nvgFillColor(vg, nvgRGBAf(1, 0.9, 0.4, 0.5 + 0.3 * math.sin(gameTime * 3.0)))
+        nvgText(vg, energyBarX + energyBarW / 2, energyBarY + energyBarH + 3, "按E冲刺", nil)
+    end
+
+    -- 感应强度指示器 (能量条上方的小闪电图标)
+    if ship.induction > 0.05 then
+        local sparkX = energyBarX + energyBarW * energyFrac
+        local sparkAlpha = ship.induction * 0.8
+        -- 小闪电符号
+        nvgFontSize(vg, 14)
+        nvgTextAlign(vg, NVG_ALIGN_CENTER + NVG_ALIGN_MIDDLE)
+        nvgFillColor(vg, nvgRGBAf(1, 1, 0.5, sparkAlpha))
+        nvgText(vg, sparkX, energyBarY + energyBarH / 2, "⚡", nil)
+    end
 
     -- 教学引导文字 (前8秒显示)
     if levelTime < 10.0 and curLevel.tutorial then
@@ -1027,9 +1210,10 @@ local function DrawLevelSelect()
     nvgFillColor(vg, nvgRGBA(255, 255, 255, 220))
     nvgText(vg, W / 2, H * 0.1, "选择关卡", nil)
 
-    local cardW = math.min(220, (W - 80) / 3)
+    local numLevels = #levels
+    local cardW = math.min(180, (W - 80) / numLevels)
     local cardH = 160
-    local totalW = cardW * 3 + 20 * 2
+    local totalW = cardW * numLevels + 20 * (numLevels - 1)
     local startX = (W - totalW) / 2
     local cardY = H * 0.3
 
@@ -1323,7 +1507,15 @@ function HandleMouseClick(eventType, eventData)
             end
             return
         end
-        TogglePolarity()
+        -- 双击检测：0.35秒内连续点击 → 冲刺
+        local now = gameTime
+        if now - lastClickTime < 0.35 then
+            BoostShip()
+            lastClickTime = 0  -- 重置防止三击
+        else
+            TogglePolarity()
+            lastClickTime = now
+        end
     elseif gameState == "complete" then
         -- 点击按钮: 下一关或返回选关
         local panelW = math.min(320, W - 40)
@@ -1431,7 +1623,11 @@ function HandleKeyDown(eventType, eventData)
                 fadeDir = -1
             end
         end
-    elseif key == KEY_1 or key == KEY_2 or key == KEY_3 then
+    elseif key == KEY_E then
+        if gameState == "playing" then
+            BoostShip()
+        end
+    elseif key == KEY_1 or key == KEY_2 or key == KEY_3 or key == KEY_4 then
         if gameState == "levelSelect" then
             local idx = key - KEY_1 + 1
             if idx >= 1 and idx <= #levels then
@@ -1501,7 +1697,7 @@ function Start()
     SubscribeToEvent("TouchBegin", "HandleTouchBegin")
 
     print("=== 磁力冲浪者：隐形星路 启动 ===")
-    print("操作: 点击/空格=切换磁极, ESC=返回, 1/2/3=选关")
+    print("操作: 点击/空格=切换磁极, E/双击=冲刺, ESC=返回, 1/2/3/4=选关")
 end
 
 function Stop()
